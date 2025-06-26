@@ -66,7 +66,7 @@ jobs:
           fi
 
           # Track last built tag
-          LAST_BUILT_TAG_FILE=".github/workflows/.last_built_tag"
+          LAST_BUILT_TAG_FILE=".last_built_tag"
           LAST_BUILT_TAG=""
           if [ -f "$LAST_BUILT_TAG_FILE" ]; then
             LAST_BUILT_TAG=$(cat $LAST_BUILT_TAG_FILE)
@@ -99,8 +99,8 @@ jobs:
           mkdir -p .github/workflows
           cp /tmp/docker-build-and-sync.yml .github/workflows/docker-build-and-sync.yml || echo "Failed to restore custom workflow"
 
-          # Clean up .github except our workflow and .last_built_tag
-          find .github -type f ! -path ".github/workflows/docker-build-and-sync.yml" ! -path ".github/workflows/.last_built_tag" -delete
+          # Clean up .github except our workflow
+          find .github -type f ! -path ".github/workflows/docker-build-and-sync.yml" -delete
           find .github -type d -empty -delete
 
           git add -A
