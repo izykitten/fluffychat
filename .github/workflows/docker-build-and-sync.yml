@@ -99,17 +99,17 @@ jobs:
           mkdir -p .github/workflows
           cp /tmp/docker-build-and-sync.yml .github/workflows/docker-build-and-sync.yml || echo "Failed to restore custom workflow"
 
-          # Clean up .github except our workflow
-          find .github -type f ! -path ".github/workflows/docker-build-and-sync.yml" -delete
+          # Clean up .github except our workflow and .last_built_tag
+          find .github -type f ! -path ".github/workflows/docker-build-and-sync.yml" ! -path ".github/workflows/.last_built_tag" -delete
           find .github -type d -empty -delete
 
           git add -A
 
-          # Commit and push if there are changes
+          # Commit and push if there are changes (including .last_built_tag)
           if git diff --staged --quiet; then
             echo "No changes to commit"
           else
-            git commit -m "Sync tags from upstream and preserve custom workflow"
+            git commit -m "Sync tags from upstream, update .last_built_tag, and preserve custom workflow"
             git push origin HEAD
           fi
 
