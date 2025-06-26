@@ -77,9 +77,11 @@ jobs:
           if [ "$LATEST_TAG" != "$LAST_BUILT_TAG" ] && [ -n "$LATEST_TAG" ]; then
             if [ -z "$LAST_BUILT_TAG" ] || [ "$(printf "%s\n%s" "$LAST_BUILT_TAG" "$LATEST_TAG" | sort -V | tail -n1)" = "$LATEST_TAG" ] && [ "$LATEST_TAG" != "$LAST_BUILT_TAG" ]; then
               NEW_TAG_DETECTED=true
-              echo "$LATEST_TAG" > $LAST_BUILT_TAG_FILE
             fi
           fi
+
+          # Always update the last built tag file to the latest tag (even if not new)
+          echo "$LATEST_TAG" > $LAST_BUILT_TAG_FILE
 
           # Output for downstream jobs
           if $IS_WEEKLY || $NEW_TAG_DETECTED; then
