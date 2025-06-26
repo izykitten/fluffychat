@@ -1,0 +1,206 @@
+name: Docker Build and Fork Sync
+
+on:
+  schedule:
+    - cron: '0 2 * * 0'  # Weekly on Sundays at 2 AM UTC
+    - cron: '0 1 * * *'  # Daily at 1 AM UTC to check for upstream changes
+  workflow_dispatch:
+    inputs:
+      force_build:
+        description: 'Force build even without tag changes'
+        required: false
+        default: false
+        type: boolean
+
+jobs:
+  sync-upstream:
+    runs-on: ubuntu-latest
+    if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
+    outputs:
+      new_tag_detected: ${{ steps.sync.outputs.new_tag_detected }}
+      latest_tag: ${{ steps.sync.outputs.latest_tag }}
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
+          fetch-depth: 0
+
+      - name: Set up Git user
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+
+      - name: Add and fetch upstream
+        run: |
+          git remote add upstream https://github.com/krille-chan/fluffychat.git || true
+          git fetch upstream
+
+      - name: Backup custom workflow
+        run: |
+          cp .github/workflows/docker-build-and-sync.yml /tmp/docker-build-and-sync.yml || echo "No custom workflow to backup"
+
+      - name: Sync with upstream and detect new tags
+        id: sync
+        run: |
+          set -e
+          # Determine upstream branch
+          UPSTREAM_BRANCH=$(git symbolic-ref refs/remotes/upstream/HEAD | sed 's@^refs/remotes/upstream/@@')
+          echo "Upstream branch: $UPSTREAM_BRANCH"
+
+          # Get current latest stable tag before fetching
+          CURRENT_TAG=$(git tag -l | grep -v -E '(rc|RC|alpha|beta|dev)' | sort -V | tail -n1 || echo "")
+          echo "Current tag: $CURRENT_TAG"
+
+          # Fetch all tags and branches from upstream
+          git fetch upstream --tags
+
+          # Get latest stable tag after fetch
+          LATEST_TAG=$(git tag -l | grep -v -E '(rc|RC|alpha|beta|dev)' | sort -V | tail -n1 || echo "")
+          echo "Latest tag after fetch: $LATEST_TAG"
+
+          # Determine if this is a weekly scheduled build
+          IS_WEEKLY=false
+          if [[ "${{ github.event.schedule }}" == '0 2 * * 0' ]]; then
+            IS_WEEKLY=true
+          fi
+
+          # Track last built tag
+          LAST_BUILT_TAG_FILE=".last_built_tag"
+          LAST_BUILT_TAG=""
+          if [ -f "$LAST_BUILT_TAG_FILE" ]; then
+            LAST_BUILT_TAG=$(cat $LAST_BUILT_TAG_FILE)
+          fi
+
+          # Detect new tag
+          NEW_TAG_DETECTED=false
+          if [ "$LATEST_TAG" != "$LAST_BUILT_TAG" ] && [ -n "$LATEST_TAG" ]; then
+            if [ -z "$LAST_BUILT_TAG" ] || [ "$(printf "%s\n%s" "$LAST_BUILT_TAG" "$LATEST_TAG" | sort -V | tail -n1)" = "$LATEST_TAG" ] && [ "$LATEST_TAG" != "$LAST_BUILT_TAG" ]; then
+              NEW_TAG_DETECTED=true
+              echo "$LATEST_TAG" > $LAST_BUILT_TAG_FILE
+            fi
+          fi
+
+          # Output for downstream jobs
+          if $IS_WEEKLY || $NEW_TAG_DETECTED; then
+            echo "new_tag_detected=true" >> $GITHUB_OUTPUT
+            echo "latest_tag=$LATEST_TAG" >> $GITHUB_OUTPUT
+            echo "New tag detected or weekly build: $LATEST_TAG"
+          else
+            echo "new_tag_detected=false" >> $GITHUB_OUTPUT
+            echo "latest_tag=$LATEST_TAG" >> $GITHUB_OUTPUT
+            echo "No new tags detected and not a weekly build"
+          fi
+
+          # Restore custom workflow file (in case any files changed)
+          rm -rf .github/workflows/*
+          mkdir -p .github/workflows
+          cp /tmp/docker-build-and-sync.yml .github/workflows/docker-build-and-sync.yml || echo "Failed to restore custom workflow"
+
+          # Clean up .github except our workflow
+          find .github -type f ! -path ".github/workflows/docker-build-and-sync.yml" -delete
+          find .github -type d -empty -delete
+
+          git add -A
+
+          # Commit and push if there are changes
+          if git diff --staged --quiet; then
+            echo "No changes to commit"
+          else
+            git commit -m "Sync tags from upstream and preserve custom workflow"
+            git push origin HEAD
+          fi
+
+  build-docker:
+    runs-on: ubuntu-latest
+    needs: [sync-upstream]
+    if: needs.sync-upstream.outputs.new_tag_detected == 'true'
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Get latest stable tag
+        id: get_tag
+        run: |
+          # Get the latest tag from the sync job output first
+          if [ -n "${{ needs.sync-upstream.outputs.latest_tag }}" ]; then
+            LATEST_TAG="${{ needs.sync-upstream.outputs.latest_tag }}"
+          else
+            # Fallback: fetch tags and find latest stable
+            git fetch --tags
+            LATEST_TAG=$(git tag -l | grep -v -E '(rc|RC|alpha|beta|dev)' | sort -V | tail -n1 || echo "")
+          fi
+          echo "latest_tag=$LATEST_TAG" >> $GITHUB_OUTPUT
+          echo "Using tag: $LATEST_TAG"
+
+      - name: Clean checkout of specific tag
+        if: steps.get_tag.outputs.latest_tag != ''
+        run: |
+          # Clean everything and do a fresh checkout of just the tag
+          git clean -fdx
+          git reset --hard
+          git checkout ${{ steps.get_tag.outputs.latest_tag }}
+          # Remove git history to save space
+          rm -rf .git
+          echo "Workspace cleaned and checked out tag: ${{ steps.get_tag.outputs.latest_tag }}"
+
+      - name: Fallback to current branch
+        if: steps.get_tag.outputs.latest_tag == ''
+        run: |
+          echo "No stable tag found, cleaning workspace but keeping current branch"
+          git clean -fdx
+
+      - name: Free up disk space
+        run: |
+          sudo rm -rf /usr/share/dotnet
+          sudo rm -rf /opt/ghc
+          sudo rm -rf "/usr/local/share/boost"
+          sudo rm -rf /usr/local/lib/android
+          sudo rm -rf "$AGENT_TOOLSDIRECTORY"
+          docker system prune -a -f
+          df -h
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Log in to GitHub Container Registry
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Extract metadata
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ghcr.io/${{ github.repository }}/fluffychat
+          tags: |
+            type=raw,value=latest
+            type=raw,value=${{ needs.sync-upstream.outputs.latest_tag }},enable=${{ needs.sync-upstream.outputs.latest_tag != '' }}
+            type=sha,prefix={{branch}}-
+
+      - name: Build and push Docker image
+        uses: docker/build-push-action@v5
+        with:
+          context: .
+          platforms: linux/amd64
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+          build-args: |
+            BUILDKIT_INLINE_CACHE=1
+
+  cleanup:
+    runs-on: ubuntu-latest
+    needs: [build-docker]
+    if: always()
+    steps:
+      - name: Clean up old images
+        continue-on-error: true
+        run: |
+          echo "Cleanup completed"
